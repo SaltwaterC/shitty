@@ -70,9 +70,7 @@ namespace {
         bool hidden = false;
     };
 
-    // macOS sinks the active tab and the terminal into one well whose rim
-    // lives in the border: three points of material with the cut and the
-    // lit edge, the lip on the terminal's own side, two points of room.
+    // The default text padding is wider on macOS in every window mode.
     #if defined(__APPLE__)
         static const char* const defaultBorder = "6";
     #else
