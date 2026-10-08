@@ -309,6 +309,9 @@ void CsdTabsUi::apply() {
             if (@available(macOS 11.0, *)) {
                 window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
             }
+            // The native frame also draws outside the title bar. Repaint
+            // it when restoring its material, including the window edges.
+            window.contentView.superview.needsDisplay = YES;
         }
         return;
     }
@@ -367,6 +370,10 @@ void CsdTabsUi::apply() {
         if (@available(macOS 11.0, *)) {
             window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
         }
+        // Changing the title bar also changes the frame's background.
+        // Invalidate the whole frame, not just our strip, so its old edge
+        // pixels do not survive until a resize or fullscreen transition.
+        frameView.needsDisplay = YES;
         if (composer.opts->vt.verbose) {
             fprintf(stderr, "%s: tabs: strip installed over the title bar\n", composer.brand->identifierCString());
         }
