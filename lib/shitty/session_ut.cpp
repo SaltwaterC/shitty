@@ -9,6 +9,7 @@
 #include "startup.h"
 #include "composer.h"
 
+#include <lib/vterm/fatal.h>
 #include <lib/vterm/vterm.h>
 #include <lib/vterm/listener.h>
 
@@ -123,6 +124,9 @@ namespace {
 
         PtyHandle* spawn(ObjPool& owner, const LaunchCommand&) override {
             StubHandle* const handle = owner.make<StubHandle>(composer, &destroyed, blockNextWrite ? &writeEntered : nullptr, blockNextWrite ? &writeResumed : nullptr);
+            if (refuseSpawn) {
+                raiseError(StringView(u8"test pty spawn refused"));
+            }
             blockNextWrite = false;
             handles.pushBack(handle);
             return handle;
@@ -131,6 +135,7 @@ namespace {
         Composer& composer;
         Vector<StubHandle*> handles;
         size_t& destroyed;
+        bool refuseSpawn = false;
         bool blockNextWrite = false;
         bool writeEntered = false;
         bool writeResumed = false;
@@ -145,7 +150,7 @@ namespace {
     }
 
     struct Harness {
-        explicit Harness(size_t* destroyed = nullptr)
+        explicit Harness(size_t* destroyed = nullptr, bool refuseInitialSpawn = false)
             : composer(*pool->make<Composer>(pool.mutPtr()))
             , pty(composer, destroyed == nullptr ? ownedDestroyed : *destroyed)
         {
@@ -156,6 +161,7 @@ namespace {
             composer.resizeWindow(80, 24);
             composer.pty = &pty;
             composer.launch = &command;
+            pty.refuseSpawn = refuseInitialSpawn;
             sessions = SessionSet::create(composer);
         }
 
@@ -287,6 +293,68 @@ STD_TEST_SUITE(SessionSet) {
         STD_INSIST(SessionSet::liveSessions == 2);
         STD_INSIST(harness.pty.handles.length() == 2);
         STD_INSIST(harness.sessions->activeTerminal() != first);
+    }
+
+    STD_TEST(RefusedNewTabPreservesExistingSessionsAndCanRetry) {
+        Harness harness;
+        Vterm* const first = harness.sessions->activeTerminal();
+        first->feedPty(StringView(u8"\x1b]2;first\x07"));
+        harness.newTab();
+        Vterm* const second = harness.sessions->activeTerminal();
+        second->feedPty(StringView(u8"\x1b]2;second\x07"));
+        ModelProbe probe{harness.sessions};
+        harness.composer.sessionsChangedListeners.pushBack(&probe);
+        harness.pty.refuseSpawn = true;
+
+        for (size_t attempt = 0; attempt < 3; ++attempt) {
+            harness.newTab();
+            STD_INSIST(harness.sessions->count() == 2);
+            STD_INSIST(SessionSet::liveSessions == 2);
+            STD_INSIST(harness.sessions->activeIndex() == 1);
+            STD_INSIST(harness.sessions->activeTerminal() == second);
+            STD_INSIST(harness.sessions->title(0) == StringView(u8"first"));
+            STD_INSIST(harness.sessions->title(1) == StringView(u8"second"));
+            STD_INSIST(harness.pty.handles.length() == 2);
+            STD_INSIST(harness.pty.destroyed == attempt + 1);
+            STD_INSIST(probe.notified == 0);
+        }
+
+        Buffer firstInput;
+        Buffer secondInput;
+        harness.pty.handles[0]->log = &firstInput;
+        harness.pty.handles[1]->log = &secondInput;
+        publish(harness.composer.clearListeners);
+        harness.previousTab();
+        STD_INSIST(harness.sessions->activeTerminal() == first);
+        publish(harness.composer.clearListeners);
+        STD_INSIST(StringView(firstInput) == StringView(u8"\x0c"));
+        STD_INSIST(StringView(secondInput) == StringView(u8"\x0c"));
+
+        harness.pty.refuseSpawn = false;
+        harness.newTab();
+        STD_INSIST(harness.sessions->count() == 3);
+        STD_INSIST(SessionSet::liveSessions == 3);
+        STD_INSIST(harness.sessions->activeIndex() == 2);
+        STD_INSIST(harness.sessions->activeTerminal() != first);
+        STD_INSIST(harness.sessions->activeTerminal() != second);
+        STD_INSIST(harness.pty.handles.length() == 3);
+        STD_INSIST(probe.count == 3);
+        STD_INSIST(probe.active == 2);
+        STD_INSIST(harness.pty.destroyed == 3);
+    }
+
+    STD_TEST(RefusedInitialSpawnPropagatesAndReleasesItsArena) {
+        size_t destroyed = 0;
+        bool refused = false;
+        try {
+            Harness harness(&destroyed, true);
+        } catch (FatalError& error) {
+            STD_INSIST(error.description() == StringView(u8"test pty spawn refused"));
+            refused = true;
+        }
+        STD_INSIST(refused);
+        STD_INSIST(destroyed == 1);
+        STD_INSIST(SessionSet::liveSessions == 0);
     }
 
     STD_TEST(NextAndPreviousWrapAround) {

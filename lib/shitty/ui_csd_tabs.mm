@@ -761,12 +761,15 @@ void CsdTabsUi::tabClosed(size_t index) {
 }
 
 void CsdTabsUi::tabOpened() {
-    SessionSet* const sessions = composer.sessions;
-    if (sessions == nullptr) {
+    if (composer.sessions == nullptr) {
         return;
     }
-    sessions->newSession();
-    composer.window->requestFrame();
+    // Use the same recoverable spawn path as the new-tab chord.
+    for (IntrusiveNode* node = composer.newTabListeners.mutFront(); node != composer.newTabListeners.mutEnd();) {
+        Listener* const listener = static_cast<Listener*>(node);
+        node = node->next;
+        listener->onListen();
+    }
 }
 
 namespace {
