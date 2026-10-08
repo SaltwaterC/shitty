@@ -70,9 +70,9 @@ namespace {
         bool hidden = false;
     };
 
-    // The default text padding is wider on macOS in every window mode.
+    // macOS has no extra text padding by default.
     #if defined(__APPLE__)
-        static const char* const defaultBorder = "6";
+        static const char* const defaultBorder = "0";
     #else
         static const char* const defaultBorder = "2";
     #endif

@@ -24,9 +24,10 @@ bg = "#2e3440"
 boldColors = false
 
 # CLI: -border PIXELS — Set the empty border around the terminal grid, from 0 to 3000 pixels.
-# The built-in default is 6 on macOS and 2 on Linux. This is text padding;
+# The built-in default is 0 on macOS and 2 on Linux. This is text padding;
 # the macOS surface reaches the window edges in both normal and fullscreen mode.
-border = 2
+# Uncomment to override the platform default.
+# border = 0
 
 # CLI: -config PATH — Load PATH instead of the default config file; command line only.
 # CLI: -debug PATH — Append window, font and grid diagnostics to PATH; for bug reports, command line only.

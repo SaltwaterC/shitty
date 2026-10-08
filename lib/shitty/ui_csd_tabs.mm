@@ -118,7 +118,6 @@ namespace {
         NSWindow* nativeWindow() const;
         TabLayout layout(CGFloat width) const;
         WellStyle style(NSAppearance* appearance) const;
-        bool lipVisible() const;
         void observeWindow(NSWindow* window);
         void stopObservingWindow();
         void redraw();
@@ -240,10 +239,6 @@ WellStyle CsdTabsUi::style(NSAppearance* appearance) const {
     result.glow = [NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:glowAlpha];
     result.lip = csdMix(bg.red / 255.0, bg.green / 255.0, bg.blue / 255.0, fg.red / 255.0, fg.green / 255.0, fg.blue / 255.0, 0.07);
     return result;
-}
-
-bool CsdTabsUi::lipVisible() const {
-    return composer.opts->border >= 1;
 }
 
 void CsdTabsUi::project() {
@@ -538,13 +533,11 @@ namespace {
         // the native title bar show through.
         [colors.fill setFill];
         [well fill];
-        if (owner->lipVisible()) {
-            [NSGraphicsContext saveGraphicsState];
-            [well addClip];
-            [colors.lip setStroke];
-            [outline stroke];
-            [NSGraphicsContext restoreGraphicsState];
-        }
+        [NSGraphicsContext saveGraphicsState];
+        [well addClip];
+        [colors.lip setStroke];
+        [outline stroke];
+        [NSGraphicsContext restoreGraphicsState];
         // The seam under the idle tabs, in the content's top point:
         // terminal background with the lip on it, from the window
         // edges to the active tab's flares.
@@ -558,7 +551,7 @@ namespace {
             if (bands[at].size.width <= 0) {
                 continue;
             }
-            [owner->lipVisible() ? colors.lip : colors.fill setFill];
+            [colors.lip setFill];
             NSRectFill(bands[at]);
         }
     }
