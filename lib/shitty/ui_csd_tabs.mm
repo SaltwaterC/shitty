@@ -51,17 +51,14 @@ namespace {
     // the shade is the dark cut on the material right at the edge, the
     // glow the lit rim one point further out, the lip the faint line on
     // the well's inner wall, mixed from the terminal's foreground so it
-    // shows on any background. Everything on the content side is
-    // opaque: the plate is the title bar's lifted material as a flat
-    // color, and the lip is mixed onto the terminal background. The
-    // content layer's top device row drops translucent and vibrant
-    // layers on this platform; opaque ones it keeps.
+    // shows on any background. The native title bar supplies the
+    // material underneath; only the active well and the seam's lip
+    // cover it with the terminal's colors.
     struct WellStyle {
         NSColor* fill;
         NSColor* shade;
         NSColor* glow;
         NSColor* lip;
-        NSColor* plate;
     };
 }
 
@@ -77,7 +74,7 @@ namespace {
 @end
 
 // The gap between the traffic lights and the first tab: paints its
-// share of the plate and the seam, and nothing else. It is a view of
+// share of the seam over the native material. It is a view of
 // its own because AppKit decides where the title bar drags the window
 // by view frames, not by hit testing - a single strip across the bar
 // that refuses to move the window over its tabs refuses everywhere.
@@ -237,14 +234,11 @@ WellStyle CsdTabsUi::style(NSAppearance* appearance) const {
     const Color fg = composer.opts->vt.fg;
     const CGFloat shadeAlpha = dark ? 0.6 : 0.2;
     const CGFloat glowAlpha = dark ? 0.1 : 0.6;
-    // The plate: the title bar's lifted material, painted by its views.
-    const CGFloat plate = dark ? 55 / 255.0 : 232 / 255.0;
     WellStyle result;
     result.fill = csdColor(bg, 1.0);
     result.shade = [NSColor colorWithSRGBRed:0 green:0 blue:0 alpha:shadeAlpha];
     result.glow = [NSColor colorWithSRGBRed:1 green:1 blue:1 alpha:glowAlpha];
     result.lip = csdMix(bg.red / 255.0, bg.green / 255.0, bg.blue / 255.0, fg.red / 255.0, fg.green / 255.0, fg.blue / 255.0, 0.07);
-    result.plate = [NSColor colorWithSRGBRed:plate green:plate blue:plate alpha:1.0];
     return result;
 }
 
@@ -305,7 +299,6 @@ void CsdTabsUi::apply() {
             [seam release];
             seam = nil;
             window.titleVisibility = NSWindowTitleVisible;
-            window.titlebarAppearsTransparent = NO;
             if (@available(macOS 11.0, *)) {
                 window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
             }
@@ -356,14 +349,9 @@ void CsdTabsUi::apply() {
         [titlebar addSubview:seam positioned:NSWindowBelow relativeTo:buttons];
         [titlebar addSubview:bar positioned:NSWindowBelow relativeTo:buttons];
         window.titleVisibility = NSWindowTitleHidden;
-        // The frame draws a shadow under the title bar onto the content's
-        // top device rows, black at the first and a quarter at the
-        // second, over everything but its own border, and the separator
-        // style does not govern it. A transparent title bar draws
-        // neither the material nor that shadow. The strip views paint
-        // the plate themselves, keeping the window background clear so
-        // AppKit does not put its highlight around the content edges.
-        window.titlebarAppearsTransparent = YES;
+        // AppKit keeps drawing the native title bar. Our views overlay
+        // only the tabs and their seam; hiding the window title does
+        // not replace the material or change the frame's transparency.
         if (@available(macOS 11.0, *)) {
             window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
         }
@@ -493,8 +481,8 @@ void CsdTabsUi::tabOpened() {
 }
 
 namespace {
-    // The well in title bar coordinates: the plate's lift, the seam
-    // with its glow and shade, the notch of the active tab filled with
+    // The well over the native title bar: the seam with its glow and
+    // shade, the notch of the active tab filled with
     // the terminal's background, and the lip inside. Both views over
     // the title bar draw it whole and clip to their own frames, so the
     // strokes meet at their shared edge without a seam of their own.
@@ -539,10 +527,6 @@ namespace {
         [well lineToPoint:NSMakePoint(right + fillet, -2)];
         [well lineToPoint:NSMakePoint(left - fillet, -2)];
         [well closePath];
-        // Paint the whole plate here, including the content's top point.
-        // Giving NSWindow this color would bring back its edge highlight.
-        [colors.plate setFill];
-        NSRectFill(NSMakeRect(0, -1, width, height + 1));
         outline.lineWidth = 4;
         [colors.glow setStroke];
         [outline stroke];
@@ -550,8 +534,8 @@ namespace {
         [colors.shade setStroke];
         [outline stroke];
         // The active tab is a piece of the terminal it fronts: its cell
-        // wears the terminal's background and foreground. Idle tabs keep
-        // the plate color underneath.
+        // wears the terminal's background and foreground. Idle tabs let
+        // the native title bar show through.
         [colors.fill setFill];
         [well fill];
         if (owner->lipVisible()) {
