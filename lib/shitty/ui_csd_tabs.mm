@@ -76,9 +76,9 @@ namespace {
 }
 @end
 
-// The plate and seam before the first tab, or the whole title bar when
-// there is only one session. It is a separate view because AppKit
-// decides where the title bar drags the window
+// The gap between the traffic lights and the first tab: paints its
+// share of the plate and the seam, and nothing else. It is a view of
+// its own because AppKit decides where the title bar drags the window
 // by view frames, not by hit testing - a single strip across the bar
 // that refuses to move the window over its tabs refuses everywhere.
 @interface CsdSeamView: NSView {
@@ -104,8 +104,8 @@ namespace {
         CsdTabsUi* parent;
     };
 
-    // Listens to the tab model and mirrors it into the title bar. After
-    // startup, AppKit work runs on the main queue: the listener fires on client
+    // Listens to the tab model and mirrors it into the title bar. All
+    // AppKit work runs on the main queue: the listener fires on client
     // fibers (the input pump delivers tab chords, the parser fiber
     // delivers titles), and AppKit layout has no business on a fiber
     // stack. The fibers themselves run on the main thread, so the
@@ -123,6 +123,7 @@ namespace {
         WellStyle style(NSAppearance* appearance) const;
         bool lipVisible() const;
         void observeWindow(NSWindow* window);
+        void stopObservingWindow();
         void redraw();
         void logGeometry(NSWindow* window) const;
 
@@ -132,7 +133,7 @@ namespace {
         CsdTabBarView* bar = nil;
         CsdSeamView* seam = nil;
         // The projected model snapshot the view draws from; nil hides
-        // the tabs and leaves the native title over the same plate.
+        // the strip (a lone session keeps the clean native title).
         NSArray<NSString*>* labels = nil;
         size_t active = 0;
         bool applyPending = false;
@@ -294,7 +295,23 @@ void CsdTabsUi::apply() {
         }
         return;
     }
-    const bool tabsVisible = labels != nil;
+    if (labels == nil) {
+        if (bar != nil) {
+            stopObservingWindow();
+            [bar removeFromSuperview];
+            [bar release];
+            bar = nil;
+            [seam removeFromSuperview];
+            [seam release];
+            seam = nil;
+            window.titleVisibility = NSWindowTitleVisible;
+            window.titlebarAppearsTransparent = NO;
+            if (@available(macOS 11.0, *)) {
+                window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleAutomatic;
+            }
+        }
+        return;
+    }
     NSButton* const zoom = [window standardWindowButton:NSWindowZoomButton];
     NSView* titlebar = zoom != nil ? zoom.superview : nil;
     // The strip wants a view spanning the whole title bar. The zoom
@@ -326,9 +343,10 @@ void CsdTabsUi::apply() {
     // content, so they paint that row themselves, opaquely.
     const NSRect bounds = titlebar.bounds;
     const NSRect frame = NSMakeRect(tabsLeft, -1, bounds.size.width - tabsLeft, bounds.size.height + 1);
-    const NSRect seamFrame = NSMakeRect(0, -1, tabsVisible ? tabsLeft : bounds.size.width, bounds.size.height + 1);
+    const NSRect seamFrame = NSMakeRect(0, -1, tabsLeft, bounds.size.height + 1);
     if (bar == nil) {
         seam = [[CsdSeamView alloc] initWithFrame:seamFrame];
+        seam.autoresizingMask = NSViewMaxXMargin | NSViewHeightSizable;
         seam->owner = this;
         bar = [[CsdTabBarView alloc] initWithFrame:frame];
         bar.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -337,14 +355,14 @@ void CsdTabsUi::apply() {
         // buttons stay on top.
         [titlebar addSubview:seam positioned:NSWindowBelow relativeTo:buttons];
         [titlebar addSubview:bar positioned:NSWindowBelow relativeTo:buttons];
+        window.titleVisibility = NSWindowTitleHidden;
         // The frame draws a shadow under the title bar onto the content's
         // top device rows, black at the first and a quarter at the
         // second, over everything but its own border, and the separator
         // style does not govern it. A transparent title bar draws
-        // neither the material nor that shadow. Use this mode from the
-        // first show, with or without tabs: changing the session count
-        // must not change the native frame's material or background.
-        // The seam and strip paint the plate themselves.
+        // neither the material nor that shadow. The strip views paint
+        // the plate themselves, keeping the window background clear so
+        // AppKit does not put its highlight around the content edges.
         window.titlebarAppearsTransparent = YES;
         if (@available(macOS 11.0, *)) {
             window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
@@ -356,9 +374,6 @@ void CsdTabsUi::apply() {
         bar.frame = frame;
         seam.frame = seamFrame;
     }
-    bar.hidden = !tabsVisible;
-    seam.autoresizingMask = NSViewHeightSizable | (tabsVisible ? NSViewMaxXMargin : NSViewWidthSizable);
-    window.titleVisibility = tabsVisible ? NSWindowTitleHidden : NSWindowTitleVisible;
     if (windowObservers[0] == nil) {
         observeWindow(window);
     }
@@ -427,6 +442,16 @@ void CsdTabsUi::observeWindow(NSWindow* window) {
     windowObservers[2] = observe(NSWindowDidExitFullScreenNotification, window);
 }
 
+void CsdTabsUi::stopObservingWindow() {
+    for (id& observer : windowObservers) {
+        if (observer != nil) {
+            [NSNotificationCenter.defaultCenter removeObserver:observer];
+            [observer release];
+            observer = nil;
+        }
+    }
+}
+
 void CsdTabsUi::redraw() {
     bar.needsDisplay = YES;
     seam.needsDisplay = YES;
@@ -480,16 +505,6 @@ namespace {
         const WellStyle colors = owner->style(appearance);
         const CGFloat cellWidth = tabs.cellWidth;
         const CGFloat height = bounds.size.height;
-        const CGFloat width = bounds.size.width;
-        // Keep the same plate and seam when the native title replaces
-        // the tabs; the window's own background always stays clear.
-        [colors.plate setFill];
-        NSRectFill(NSMakeRect(0, -1, width, height + 1));
-        if (owner->labels.count == 0) {
-            [owner->lipVisible() ? colors.lip : colors.fill setFill];
-            NSRectFill(NSMakeRect(0, -1, width, 1));
-            return;
-        }
         // The notch of the active tab, drawn from the seam up and back down
         // to it, y up: a flare out of the seam, two rounded top corners, a
         // flare back in.
@@ -511,6 +526,7 @@ namespace {
         // notch. Strokes centered on it leave their outer half on the
         // material; the fill covers the inner half.
         // The seam reaches both window edges in every window mode.
+        const CGFloat width = bounds.size.width;
         NSBezierPath* const outline = [NSBezierPath bezierPath];
         [outline moveToPoint:NSMakePoint(0, 0)];
         [outline lineToPoint:NSMakePoint(left - fillet, 0)];
@@ -523,6 +539,10 @@ namespace {
         [well lineToPoint:NSMakePoint(right + fillet, -2)];
         [well lineToPoint:NSMakePoint(left - fillet, -2)];
         [well closePath];
+        // Paint the whole plate here, including the content's top point.
+        // Giving NSWindow this color would bring back its edge highlight.
+        [colors.plate setFill];
+        NSRectFill(NSMakeRect(0, -1, width, height + 1));
         outline.lineWidth = 4;
         [colors.glow setStroke];
         [outline stroke];
@@ -716,14 +736,12 @@ namespace {
     return nil;
 }
 
-- (void)viewDidChangeEffectiveAppearance {
-    [super viewDidChangeEffectiveAppearance];
-    owner->redraw();
-}
-
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
     NSRectClip(self.bounds);
+    if (owner->labels.count == 0) {
+        return;
+    }
     const NSRect titlebar = NSMakeRect(0, 0, self.superview.bounds.size.width, self.bounds.size.height - 1);
     NSAffineTransform* const shift = [NSAffineTransform transform];
     [shift translateXBy:0 yBy:1];
@@ -734,8 +752,5 @@ namespace {
 @end
 
 void createCsdTabsUi(ObjPool& owner, Composer& composer) {
-    // Startup runs on the main stack, before requestShow() and before
-    // entering fullscreen. Install the frame's final appearance here;
-    // later model changes only switch between the title and the tabs.
-    owner.make<CsdTabsUi>(composer)->apply();
+    owner.make<CsdTabsUi>(composer);
 }
