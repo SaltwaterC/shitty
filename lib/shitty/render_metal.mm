@@ -224,7 +224,6 @@ namespace {
         bool stateValid = false;
         bool ready = false;
     };
-
 }
 
 CallMetalFontChanged::CallMetalFontChanged(MetalRendererImpl* renderer_)
@@ -308,6 +307,7 @@ bool MetalRendererImpl::initialize() {
     metalLayer.device = device;
     metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     metalLayer.framebufferOnly = NO;
+    metalLayer.opaque = NO;
     metalLayer.presentsWithTransaction = YES;
     metalLayer.maximumDrawableCount = framesInFlight;
     metalLayer.allowsNextDrawableTimeout = NO;

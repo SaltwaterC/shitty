@@ -1126,6 +1126,10 @@ WindowImpl::WindowImpl(PlatformImpl& platform_, const WindowOptions& options)
     }
     const NSRect frame = NSMakeRect(0, 0, max(1u, options.width), max(1u, options.height));
     window = [[PltWindow alloc] initWithContentRect:frame styleMask:(NSWindowStyleMask)cocoaWindowStyleMask(options.decorations) backing:NSBackingStoreBuffered defer:NO];
+    // Let the content supply the window's pixels, without an opaque
+    // window background and its native edge highlight beneath it.
+    window.opaque = NO;
+    window.backgroundColor = NSColor.clearColor;
     delegate = [PltWindowDelegate new];
     delegate.owner = this;
     window.delegate = delegate;
