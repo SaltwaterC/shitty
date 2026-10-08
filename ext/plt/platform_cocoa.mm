@@ -209,6 +209,9 @@ void cocoaWakeReady(CFMachPortRef port, void* message, CFIndex size, void* owner
     // synchronously during a live resize, so we render the resize frame inside
     // the same transaction as the bounds change.
     CAMetalLayer* layer = [CAMetalLayer layer];
+    // Match the clear window backing before its first display. The
+    // renderer may only be initialized after requestShow().
+    layer.opaque = NO;
     layer.needsDisplayOnBoundsChange = YES;
     return layer;
 }
