@@ -5,7 +5,7 @@
 
 """Throughput shootout against alacritty, kitty, ghostty and zetta.
 
-Every terminal cats the same payloads through its GUI with the setup
+Every terminal is fed the same payloads through its GUI with the setup
 equalized first: Menlo 12pt on macOS or DejaVu Sans Mono 12px on Linux,
 an 80x24 grid and the same cell box in
 pixels, scrollback of 500 lines. Each configuration is verified inside
@@ -17,6 +17,14 @@ Payloads: 1GB of printable ASCII with newlines (the scroll path) and
 100MB of seeded pseudo-random bytes (the invalid-UTF-8 parser path).
 kitty skips the random payload: it reacts to the embedded escape junk
 with title changes and bells instead of drawing.
+
+The payloads are written by WRITER rather than cat. cat leaves the
+kernel to turn each newline into CRLF (the tty's OPOST/ONLCR output
+processing), and that ran at 210-240 MiB/s for ASCII and 170-190 MiB/s
+for random bytes on Linux 7.0, below what the faster terminals read.
+WRITER does that translation itself and switches the processing off,
+so the terminal receives the same bytes and the pty carries ~600 MiB/s
+of either payload.
 
 Usage:
     compare.py [--runs N] [--timeout SECONDS] [--work DIR] [--terminal NAME ...] [--verbose]
@@ -58,6 +66,53 @@ WINSZ_PROBE = (
     ' fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))\n'
     'open(sys.argv[1], "w").write(f"{cols} {rows} {xp} {yp}")\n'
 )
+
+# cat, minus the kernel's output processing. The kernel handles a write
+# under OPOST byte by byte and passes each newline on as a separate
+# two-byte write. With output processing off, a write goes through
+# whole. The tty is the terminal's own, so nothing else writes to it
+# while this runs. The bytes match what the kernel would send only when
+# ONLCR is the one output flag in effect (the default). Under any other
+# flag this copies plainly and leaves the processing to the kernel.
+WRITER = """\
+import os, signal, sys, termios
+
+def stop(signum, frame):
+    raise SystemExit(128 + signum)
+
+def main(path):
+    saved = None
+    if os.isatty(1):
+        attrs = termios.tcgetattr(1)
+        others = 0
+        for name in ("OCRNL", "ONOCR", "ONLRET", "OLCUC", "ONOEOT", "OXTABS", "TABDLY"):
+            others |= getattr(termios, name, 0)
+        if attrs[1] & (termios.OPOST | termios.ONLCR | others) == termios.OPOST | termios.ONLCR:
+            saved = list(attrs)
+            attrs[1] &= ~termios.OPOST
+            for signum in (signal.SIGHUP, signal.SIGTERM):
+                signal.signal(signum, stop)
+            termios.tcsetattr(1, termios.TCSANOW, attrs)
+    try:
+        with open(path, "rb", buffering=0) as payload:
+            # 4KiB writes measured 10-20% ahead of 64KiB, through a
+            # bare reader and through a terminal alike.
+            while chunk := payload.read(4096):
+                if saved:
+                    chunk = chunk.replace(b"\\n", b"\\r\\n")
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(1, view):]
+    finally:
+        if saved:
+            try:
+                termios.tcsetattr(1, termios.TCSANOW, saved)
+            except termios.error:
+                pass  # The terminal hung up; there is nothing to restore.
+
+main(sys.argv[1])
+"""
+
 
 class Terminal:
     def __init__(self, name, executable):
@@ -283,6 +338,7 @@ def ensure_payloads(work):
         with random_payload.open("wb") as out:
             for _ in range(RANDOM_PAYLOAD_BYTES // 1_000_000):
                 out.write(rng.randbytes(1_000_000))
+    (work / "write.py").write_text(WRITER)
     return [
         ("ascii", ascii_payload, ASCII_PAYLOAD_BYTES),
         ("random", random_payload, RANDOM_PAYLOAD_BYTES),
@@ -296,7 +352,8 @@ def bench(terminal, payload, runs, timeout=RUN_TIMEOUT, verbose=False):
         if verbose:
             print(f"  {terminal.name}: {payload.stem}, run {attempt}/{runs} "
                   f"(timeout {timeout:g}s)", flush=True)
-        command = f"cat {shlex.quote(str(payload))}"
+        writer = payload.parent / "write.py"
+        command = f"python3 {shlex.quote(str(writer))} {shlex.quote(str(payload))}"
         argv = ["/usr/bin/time", "-p", *terminal.argv(command)]
         try:
             completed = run(argv, timeout=timeout)
@@ -365,7 +422,7 @@ def main():
     payloads = ensure_payloads(arguments.work)
     for label, payload, size in payloads:
         mib = size / (1 << 20)
-        print(f"\n{label} {mib:.0f}MiB (cat, best wall of {arguments.runs}):")
+        print(f"\n{label} {mib:.0f}MiB (best wall of {arguments.runs}):")
         rows = []
         for terminal in ready:
             if label == "random" and terminal.skip_random:

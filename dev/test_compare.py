@@ -9,9 +9,12 @@ import contextlib
 import io
 import os
 from pathlib import Path
+import pty
+import select
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 
@@ -112,6 +115,79 @@ class CompareTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 compare.run([sys.executable, "-c", program], timeout=2)
             self.assert_stopped(int(pidfile.read_text()))
+
+
+class WriterTests(unittest.TestCase):
+    """WRITER must put on the wire exactly what cat would, and leave the tty as it found it."""
+
+    PAYLOAD = b"line\nalready crlf\r\nbare cr\rtab\tbackspace\b\x04eot\xff\xfe\n\n"
+
+    def through_pty(self, argv, oflag_change=lambda oflag: oflag):
+        master, slave = pty.openpty()
+        try:
+            attrs = termios.tcgetattr(slave)
+            attrs[1] = oflag_change(attrs[1])
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+            before = termios.tcgetattr(slave)
+            subprocess.run(argv, stdout=slave, check=True, timeout=10)
+            after = termios.tcgetattr(slave)
+            # The test keeps the slave open to read its settings back, so the
+            # master never reports end of file; read until it goes quiet.
+            received = b""
+            while select.select([master], [], [], 0.2)[0]:
+                received += os.read(master, 65536)
+            return received, before, after
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def assert_matches_cat(self, oflag_change=lambda oflag: oflag):
+        with tempfile.TemporaryDirectory() as work:
+            payload = Path(work) / "payload.bin"
+            payload.write_bytes(self.PAYLOAD)
+            writer = Path(work) / "write.py"
+            writer.write_text(compare.WRITER)
+            expected, _, _ = self.through_pty(["cat", str(payload)], oflag_change)
+            received, before, after = self.through_pty(
+                [sys.executable, str(writer), str(payload)], oflag_change)
+        self.assertEqual(received, expected)
+        self.assertEqual(after, before)
+        return received
+
+    def test_default_output_processing_is_reproduced(self):
+        received = self.assert_matches_cat()
+        self.assertIn(b"line\r\nalready crlf\r\r\n", received)
+
+    def test_output_processing_is_off_while_writing(self):
+        # Matching bytes cannot tell the fast path from the kernel's, so look
+        # at the tty while the writer waits for its payload to be opened.
+        with tempfile.TemporaryDirectory() as work:
+            payload = Path(work) / "payload"
+            os.mkfifo(payload)
+            writer = Path(work) / "write.py"
+            writer.write_text(compare.WRITER)
+            master, slave = pty.openpty()
+            process = subprocess.Popen([sys.executable, str(writer), str(payload)], stdout=slave)
+            try:
+                deadline = time.monotonic() + 5
+                while termios.tcgetattr(slave)[1] & termios.OPOST:
+                    self.assertLess(time.monotonic(), deadline, "OPOST was never switched off")
+                    time.sleep(0.01)
+                payload.write_bytes(b"done\n")
+                self.assertEqual(process.wait(timeout=5), 0)
+                self.assertTrue(termios.tcgetattr(slave)[1] & termios.OPOST)
+            finally:
+                process.kill()
+                process.wait()
+                os.close(master)
+                os.close(slave)
+
+    def test_other_output_flags_are_left_to_the_kernel(self):
+        self.assert_matches_cat(lambda oflag: oflag | termios.OCRNL)
+
+    def test_disabled_output_processing_passes_bytes_through(self):
+        received = self.assert_matches_cat(lambda oflag: oflag & ~termios.OPOST)
+        self.assertEqual(received, self.PAYLOAD)
 
 
 if __name__ == "__main__":
