@@ -65,17 +65,23 @@ RANDOM_PAYLOAD_BYTES = 100_000_000
 RUN_TIMEOUT = 300
 PROBE_TIMEOUT = 15
 
-# The child can start before the GUI applies its requested initial size.
-# Wait for the target grid, bounded so genuine sizing failures still report.
+# The child can start before the GUI applies its requested initial size,
+# and a provisional size can already be the target grid at the wrong
+# display scale (Shitty on Retina starts at 80x24 with 1x cells). Wait for
+# the target grid to hold unchanged, bounded so sizing failures still report.
 WINSZ_PROBE = (
     "import fcntl, struct, sys, termios, time\n"
     "deadline = time.monotonic() + 2\n"
+    "last, since = None, time.monotonic()\n"
     "while True:\n"
-    '    rows, cols, xp, yp = struct.unpack("HHHH",'
-    ' fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))\n'
-    f"    if (cols, rows) == ({COLUMNS}, {ROWS}) or time.monotonic() >= deadline:\n"
+    '    size = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))\n'
+    "    now = time.monotonic()\n"
+    "    if size != last:\n"
+    "        last, since = size, now\n"
+    "    rows, cols, xp, yp = size\n"
+    f"    if ((cols, rows) == ({COLUMNS}, {ROWS}) and now - since >= 0.3) or now >= deadline:\n"
     "        break\n"
-    "    time.sleep(0.05)\n"
+    "    time.sleep(0.02)\n"
     'open(sys.argv[1], "w").write(f"{cols} {rows} {xp} {yp}")\n'
 )
 
@@ -126,7 +132,12 @@ class Shitty(Terminal):
 
 class Alacritty(Terminal):
     def __init__(self):
-        super().__init__("alacritty", which("alacritty"))
+        super().__init__(
+            "alacritty",
+            which("alacritty") or "/Applications/Alacritty.app/Contents/MacOS/alacritty",
+        )
+        # TIOCGWINSZ carries cols * cell_width in physical pixels.
+        self.cell_units = "backing pixels"
 
     def argv(self, command):
         return [
@@ -405,7 +416,7 @@ def main():
         if isinstance(terminal, Shitty):
             terminal.calibrate(arguments.work)
         if isinstance(terminal, Zetta):
-            reference = next((t for t in ready if t.cell and t.cell_units == "backing pixels"), None)
+            reference = next((t for t in ready if t.cell and isinstance(t, (Shitty, Ghostty))), None)
             # A Zetta-only run still uses the same measured reference; do not
             # hard-code Retina dimensions that would double the size on Linux.
             if reference is None:
