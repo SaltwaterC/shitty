@@ -5,13 +5,21 @@
 
 """Throughput shootout against alacritty, kitty, ghostty and zetta.
 
-Every terminal cats the same payloads through its GUI with the setup
-equalized first: Menlo 12pt on macOS or DejaVu Sans Mono 12px on Linux,
-an 80x24 grid and the same cell box in
-pixels, scrollback of 500 lines. Each configuration is verified inside
-the terminal through TIOCGWINSZ before anything is measured; shitty's
+Every terminal cats the same payloads through its GUI with Menlo 12pt
+on macOS or DejaVu Sans Mono 12px on Linux and an 80x24 grid.
+The grid is verified through TIOCGWINSZ before anything is measured; shitty's
 -geometry is calibrated automatically because the window manager may
 not honour the requested grid exactly.
+Zetta's exact backing-pixel cell size is set from a verified Shitty or
+Ghostty probe, including the display scale. Its measured cell must match
+before it is benchmarked. Other cell-size differences are reported.
+Scrollback is requested as 500 lines where supported. Older Ghostty builds
+use a 1MiB byte budget instead; bytes cannot be converted exactly to lines.
+
+Keep every benchmark window visible and in front for the entire run.
+Ghostty suspends rendering when fully occluded; covered or minimized runs
+do not measure the same rendering workload. Visibility is not checked by
+this script.
 
 Payloads: 1GB of printable ASCII with newlines (the scroll path) and
 100MB of seeded pseudo-random bytes (the invalid-UTF-8 parser path).
@@ -42,8 +50,13 @@ FONT_SIZE = 12
 # Shitty uses points on macOS and pixels on Linux. The other terminals
 # expose points (Alacritty, Kitty, Ghostty) or logical pixels (Zetta).
 FONT_POINTS = FONT_SIZE if sys.platform == "darwin" else FONT_SIZE * 72 / 96
-FONT_PIXELS = FONT_SIZE * 96 / 72 if sys.platform == "darwin" else FONT_SIZE
+# GPUI logical pixels map to Cocoa points on macOS, not CSS pixels.
+FONT_PIXELS = FONT_SIZE
 SCROLLBACK_LINES = 500
+# Older Ghostty versions store page metadata and 8-byte cells, not raw
+# text bytes. Leave room for multiple pages, including the active screen.
+# This is a byte budget, not a promise of exactly 500 retained lines.
+GHOSTTY_SCROLLBACK_BYTES = 1 << 20
 # A gigabyte of ASCII, so the app startup (~0.15s) reads as noise, not
 # as a quarter of the wall time. The random payload is CPU-bound at a
 # tenth of the throughput; 100MB already dwarfs the startup there.
@@ -52,10 +65,17 @@ RANDOM_PAYLOAD_BYTES = 100_000_000
 RUN_TIMEOUT = 300
 PROBE_TIMEOUT = 15
 
+# The child can start before the GUI applies its requested initial size.
+# Wait for the target grid, bounded so genuine sizing failures still report.
 WINSZ_PROBE = (
-    "import fcntl, struct, sys, termios\n"
-    'rows, cols, xp, yp = struct.unpack("HHHH",'
+    "import fcntl, struct, sys, termios, time\n"
+    "deadline = time.monotonic() + 2\n"
+    "while True:\n"
+    '    rows, cols, xp, yp = struct.unpack("HHHH",'
     ' fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))\n'
+    f"    if (cols, rows) == ({COLUMNS}, {ROWS}) or time.monotonic() >= deadline:\n"
+    "        break\n"
+    "    time.sleep(0.05)\n"
     'open(sys.argv[1], "w").write(f"{cols} {rows} {xp} {yp}")\n'
 )
 
@@ -65,6 +85,7 @@ class Terminal:
         self.executable = executable
         self.skip_random = False
         self.cell = None
+        self.cell_units = "PTY units"
 
     def available(self):
         return self.executable is not None and Path(self.executable).exists()
@@ -76,6 +97,7 @@ class Terminal:
 class Shitty(Terminal):
     def __init__(self, repo):
         super().__init__("shitty", str(repo / ".build" / "st"))
+        self.cell_units = "backing pixels"
         # The window manager scales the requested geometry; calibrate()
         # replaces this with whatever request yields the target grid.
         self.geometry = f"{COLUMNS}x{ROWS}"
@@ -147,6 +169,25 @@ class Ghostty(Terminal):
             "ghostty",
             which("ghostty") or "/Applications/Ghostty.app/Contents/MacOS/ghostty",
         )
+        self.cell_units = "backing pixels"
+        self.scrollback_args = [f"--scrollback-limit={GHOSTTY_SCROLLBACK_BYTES}"]
+        self.scrollback_description = f"{GHOSTTY_SCROLLBACK_BYTES} bytes (line limit unavailable)"
+        if self.available():
+            try:
+                config = subprocess.run(
+                    [self.executable, "+show-config", "--default"],
+                    capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                config = None
+            if config is not None and config.returncode == 0 and re.search(
+                r"^scrollback-limit-lines\s*=", config.stdout, re.M
+            ):
+                self.scrollback_args = [
+                    "--scrollback-limit-bytes=unlimited",
+                    f"--scrollback-limit-lines={SCROLLBACK_LINES}",
+                ]
+                self.scrollback_description = f"{SCROLLBACK_LINES} lines requested (page-granular)"
 
     def argv(self, command):
         return [
@@ -163,9 +204,9 @@ class Ghostty(Terminal):
             "--window-padding-x=0",
             "--window-padding-y=0",
             # GTK decorations reduce the requested terminal grid height.
-            "--window-decoration=none",
-            # Bytes, not lines; sized for the shared 500 lines.
-            f"--scrollback-limit={SCROLLBACK_LINES * (COLUMNS + 2)}",
+            # Cocoa sizes the grid separately from its native titlebar.
+            *(["--window-decoration=none"] if sys.platform != "darwin" else []),
+            *self.scrollback_args,
             "--quit-after-last-window-closed=true",
             "-e", "sh", "-c", command,
         ]
@@ -177,11 +218,13 @@ class Zetta(Terminal):
             "zetta",
             which("zetta") or "/Applications/Zetta.app/Contents/MacOS/zetta",
         )
+        self.cell_units = "backing pixels"
+        self.cell_size = None
         self.config = work.resolve() / "zetta.json"
 
     def argv(self, command):
         # An explicit config prevents command handoff to a running Zetta.
-        # GPUI font sizes are logical pixels, so convert the shared points.
+        # GPUI logical pixels are Cocoa points on macOS, matching FONT_SIZE.
         # --command injects text into an interactive shell; a profile runs
         # the child directly and closes the window when that child exits.
         self.config.write_text(json.dumps({
@@ -200,6 +243,7 @@ class Zetta(Terminal):
             "--no-mux",
             # Opens the window at the grid, with the pty already that size.
             "--geometry", f"{COLUMNS}x{ROWS}",
+            *(["--cell-size", "%dx%d" % self.cell_size] if self.cell_size else []),
             "--profile", "compare",
         ]
 
@@ -264,6 +308,13 @@ def verify(terminal, work):
         print(f"{terminal.name}: grid {cols}x{rows} != {COLUMNS}x{ROWS}, skipping")
         return False
     terminal.cell = (xp / cols, yp / rows)
+    if xp <= 0 or yp <= 0:
+        terminal.cell = None
+    if isinstance(terminal, Zetta) and terminal.cell_size is not None:
+        if terminal.cell != terminal.cell_size:
+            print(f"{terminal.name}: reported cell {terminal.cell} != requested "
+                  f"{terminal.cell_size} backing pixels, skipping")
+            return False
     return True
 
 
@@ -332,6 +383,8 @@ def main():
     parser.add_argument("--work", type=Path, default=Path("/tmp/shitty-compare"))
     parser.add_argument("--terminal", action="append", help="limit to these names")
     parser.add_argument("--verbose", action="store_true", help="show progress for each benchmark run")
+    parser.add_argument("--probe-only", action="store_true",
+                        help="report terminal geometry without generating payloads or benchmarking")
     arguments = parser.parse_args()
     if arguments.runs < 1 or not 0 < arguments.timeout < float("inf"):
         parser.error("--runs and --timeout must be positive and finite")
@@ -339,7 +392,8 @@ def main():
     repo = Path(__file__).resolve().parent.parent
     arguments.work.mkdir(parents=True, exist_ok=True)
 
-    terminals = [Shitty(repo), Alacritty(), Kitty(), Ghostty(), Zetta(arguments.work)]
+    installed = [Shitty(repo), Alacritty(), Kitty(), Ghostty(), Zetta(arguments.work)]
+    terminals = installed
     if arguments.terminal:
         terminals = [t for t in terminals if t.name in arguments.terminal]
 
@@ -350,17 +404,45 @@ def main():
             continue
         if isinstance(terminal, Shitty):
             terminal.calibrate(arguments.work)
+        if isinstance(terminal, Zetta):
+            reference = next((t for t in ready if t.cell and t.cell_units == "backing pixels"), None)
+            # A Zetta-only run still uses the same measured reference; do not
+            # hard-code Retina dimensions that would double the size on Linux.
+            if reference is None:
+                for candidate in installed:
+                    if not isinstance(candidate, (Shitty, Ghostty)) or not candidate.available():
+                        continue
+                    if candidate in terminals:
+                        continue  # Its earlier probe already failed.
+                    if isinstance(candidate, Shitty):
+                        candidate.calibrate(arguments.work)
+                    if verify(candidate, arguments.work) and candidate.cell:
+                        reference = candidate
+                        break
+            if reference is None or any(v != int(v) for v in reference.cell):
+                print("zetta: no verified integer backing-pixel cell reference, skipping")
+                continue
+            terminal.cell_size = tuple(int(v) for v in reference.cell)
         if verify(terminal, arguments.work):
             ready.append(terminal)
     if not ready:
         sys.exit("no terminals to compare")
 
-    cells = {terminal.cell for terminal in ready}
     for terminal in ready:
-        cell = "%.1fx%.1f" % terminal.cell
-        print(f"{terminal.name}: grid {COLUMNS}x{ROWS}, cell {cell}px")
-    if len(cells) != 1:
-        print("warning: cell sizes differ, the comparison is not apples to apples")
+        cell = (("%.2fx%.2f " % terminal.cell) + terminal.cell_units
+                if terminal.cell else "unknown")
+        print(f"{terminal.name}: grid {COLUMNS}x{ROWS}, reported cell {cell}")
+        if isinstance(terminal, Ghostty):
+            print(f"{terminal.name}: scrollback {terminal.scrollback_description}")
+    if (len({(terminal.cell, terminal.cell_units) for terminal in ready}) != 1
+            or any(t.cell is None or t.cell_units != "backing pixels" for t in ready)):
+        print("warning: cell sizes differ or are unknown; physical size is not normalized")
+    else:
+        print("Cell sizes match in backing pixels.")
+    print("Keep each benchmark window visible and in front throughout its run; visibility is not checked.",
+          flush=True)
+    if arguments.probe_only:
+        return
 
     payloads = ensure_payloads(arguments.work)
     for label, payload, size in payloads:

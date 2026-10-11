@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import compare
 
@@ -31,6 +32,53 @@ class FakeTerminal:
 
 
 class CompareTests(unittest.TestCase):
+    def test_zetta_uses_measured_cell_size_on_both_platforms(self):
+        with tempfile.TemporaryDirectory() as work:
+            terminal = compare.Zetta(Path(work))
+            for platform, cell in [("darwin", (14, 28)), ("linux", (7, 14))]:
+                with self.subTest(platform=platform), patch.object(compare.sys, "platform", platform):
+                    terminal.cell_size = cell
+                    argv = terminal.argv("true")
+                    self.assertEqual(argv[argv.index("--cell-size") + 1], "%dx%d" % cell)
+
+    def test_zetta_rejects_old_logical_size_reports(self):
+        with tempfile.TemporaryDirectory() as work:
+            terminal = compare.Zetta(Path(work))
+            terminal.cell_size = (14, 28)
+            with patch.object(compare, "probe", return_value=(80, 24, 560, 336)), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(compare.verify(terminal, Path(work)))
+            with patch.object(compare, "probe", return_value=(80, 24, 1120, 672)):
+                self.assertTrue(compare.verify(terminal, Path(work)))
+
+    def test_ghostty_keeps_macos_window_frame_and_linux_geometry_workaround(self):
+        with patch.object(compare.Ghostty, "available", return_value=False):
+            terminal = compare.Ghostty()
+        with patch.object(compare.sys, "platform", "darwin"):
+            self.assertNotIn("--window-decoration=none", terminal.argv("true"))
+        with patch.object(compare.sys, "platform", "linux"):
+            self.assertIn("--window-decoration=none", terminal.argv("true"))
+
+    def test_ghostty_line_limit_does_not_impose_tiny_byte_limit(self):
+        config = subprocess.CompletedProcess([], 0, stdout=(
+            "scrollback-limit-bytes = 50000000\nscrollback-limit-lines = unlimited\n"
+        ))
+        with patch.object(compare.Ghostty, "available", return_value=True), \
+                patch.object(compare.subprocess, "run", return_value=config):
+            terminal = compare.Ghostty()
+        argv = terminal.argv("true")
+        self.assertIn("--scrollback-limit-lines=500", argv)
+        self.assertIn("--scrollback-limit-bytes=unlimited", argv)
+        self.assertFalse(any(arg.startswith("--scrollback-limit=") for arg in argv))
+
+    def test_older_ghostty_uses_explicit_byte_budget(self):
+        config = subprocess.CompletedProcess([], 0, stdout="scrollback-limit = 10000000\n")
+        with patch.object(compare.Ghostty, "available", return_value=True), \
+                patch.object(compare.subprocess, "run", return_value=config):
+            terminal = compare.Ghostty()
+        self.assertIn("--scrollback-limit=1048576", terminal.argv("true"))
+        self.assertIn("line limit unavailable", terminal.scrollback_description)
+
     def assert_stopped(self, pid):
         # An orphan may briefly remain a zombie until init reaps it.
         deadline = time.monotonic() + 2
