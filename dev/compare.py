@@ -233,6 +233,9 @@ class Zetta(Terminal):
             which("zetta") or "/Applications/Zetta.app/Contents/MacOS/zetta",
         )
         self.config = work.resolve() / "zetta.json"
+        # GPUI's line height differs from the others at the same font
+        # size; main() copies the reference cell here before verifying.
+        self.cell_size = None
 
     def argv(self, command):
         # An explicit config prevents command handoff to a running Zetta.
@@ -255,6 +258,8 @@ class Zetta(Terminal):
             "--no-mux",
             # Opens the window at the grid, with the pty already that size.
             "--geometry", f"{COLUMNS}x{ROWS}",
+            # Backing pixels, the same unit TIOCGWINSZ reports.
+            *(["--cell-size", "%dx%d" % self.cell_size] if self.cell_size else []),
             "--profile", "compare",
         ]
 
@@ -407,6 +412,8 @@ def main():
             continue
         if isinstance(terminal, Shitty):
             terminal.calibrate(arguments.work)
+        if isinstance(terminal, Zetta) and ready:
+            terminal.cell_size = tuple(round(n) for n in ready[0].cell)
         if verify(terminal, arguments.work):
             ready.append(terminal)
     if not ready:
